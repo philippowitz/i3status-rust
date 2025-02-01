@@ -83,9 +83,9 @@ struct Block<'a> {
 }
 
 impl Block<'_> {
-    async fn set_text(&mut self, text: String) -> Result<()> {
+    async fn set_text(&mut self, text: String, icon: &str) -> Result<()> {
         let mut values = map!(
-            "icon" => Value::icon("pomodoro"),
+            "icon" => Value::icon(icon),
         );
         if !text.is_empty() {
             values.insert("message".into(), Value::text(text));
@@ -99,30 +99,6 @@ impl Block<'_> {
         Ok(())
     }
 
-    async fn read_params(&mut self) -> Result<(Duration, Duration, u64)> {
-        let task_len = self.read_u64(25, "Task length:").await?;
-        let break_len = self.read_u64(5, "Break length:").await?;
-        let pomodoros = self.read_u64(4, "Pomodoros:").await?;
-        Ok((
-            Duration::from_secs(task_len * 60),
-            Duration::from_secs(break_len * 60),
-            pomodoros,
-        ))
-    }
-
-    async fn read_u64(&mut self, mut number: u64, msg: &str) -> Result<u64> {
-        loop {
-            self.set_text(format!("{msg} {number}")).await?;
-            match &*self.actions.recv().await.error("channel closed")? {
-                "_left" => break,
-                "_up" => number += 1,
-                "_down" => number = number.saturating_sub(1),
-                _ => (),
-            }
-        }
-        Ok(number)
-    }
-
     async fn run_pomodoro(
         &mut self,
         task_len: Duration,
@@ -133,6 +109,7 @@ impl Block<'_> {
             // Task timer
             self.widget.state = State::Idle;
             let timer = Instant::now();
+            self.set_text("Started", "pomodoro_started").await?;
             loop {
                 let elapsed = timer.elapsed();
                 if elapsed >= task_len {
@@ -148,16 +125,19 @@ impl Block<'_> {
                         (left.as_secs() + 59) / 60,
                     )
                 };
-                self.set_text(text).await?;
+                self.set_text(text, "pomodoro_started").await?;
                 select! {
                     _ = sleep(Duration::from_secs(10)) => (),
-                    _ = self.wait_for_click("_middle") => return Ok(()),
+                    _ = self.wait_for_click("_middle") => {
+                        self.set_text("Paused", "pomodoro_paused").await?;
+                        return Ok(());
+                    }
                 }
             }
-
+            
             // Show break message
             self.widget.state = State::Good;
-            self.set_text(self.block_config.message.clone()).await?;
+            self.set_text(self.block_config.message.clone(), "pomodoro_break").await?;
             if let Some(cmd) = &self.block_config.notify_cmd {
                 let cmd = cmd.replace("{msg}", &self.block_config.message);
                 if self.block_config.blocking_cmd {
@@ -171,12 +151,12 @@ impl Block<'_> {
             } else {
                 self.wait_for_click("_left").await?;
             }
-
-            // No break after the last pomodoro
+            
             if pomodoro == pomodoros - 1 {
+                self.set_text("Stopped", "pomodoro_stopped").await?;
                 break;
             }
-
+            
             // Break timer
             let timer = Instant::now();
             loop {
@@ -185,33 +165,14 @@ impl Block<'_> {
                     break;
                 }
                 let left = break_len - elapsed;
-                self.set_text(format!("Break: {} min", (left.as_secs() + 59) / 60,))
+                self.set_text(format!("Break: {} min", (left.as_secs() + 59) / 60,), "pomodoro_break")
                     .await?;
                 select! {
                     _ = sleep(Duration::from_secs(10)) => (),
                     _ = self.wait_for_click("_middle") => return Ok(()),
                 }
             }
-
-            // Show task message
-            self.widget.state = State::Good;
-            self.set_text(self.block_config.break_message.clone())
-                .await?;
-            if let Some(cmd) = &self.block_config.notify_cmd {
-                let cmd = cmd.replace("{msg}", &self.block_config.break_message);
-                if self.block_config.blocking_cmd {
-                    spawn_shell_sync(&cmd)
-                        .await
-                        .error("failed to run notify_cmd")?;
-                } else {
-                    spawn_shell(&cmd).error("failed to run notify_cmd")?;
-                    self.wait_for_click("_left").await?;
-                }
-            } else {
-                self.wait_for_click("_left").await?;
-            }
         }
-
         Ok(())
     }
 }
